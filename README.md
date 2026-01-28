@@ -22,7 +22,7 @@ Built with [Nuxt 4](https://nuxt.com) and [Docus](https://docus.dev).
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/content-shield.git
+git clone https://github.com/lekandigital/content-shield.git
 cd content-shield
 npm install
 ```
