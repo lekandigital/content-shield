@@ -1,0 +1,137 @@
+import { defineEventHandler, getRequestURL, getHeader, setHeader, sendRedirect, createError } from 'h3'
+import { getValidatedSession } from '../utils/session'
+
+// Known archiver user agents
+const ARCHIVER_USER_AGENTS = [
+  'ia_archiver',
+  'archive.org_bot',
+  'wayback',
+  'httrack',
+  'wget',
+  'curl',
+  'libwww',
+  'python-requests',
+  'go-http-client',
+  'java/',
+  'apache-httpclient',
+  'scrapy',
+  'phantom',
+  'headless',
+  'puppeteer'
+]
+
+// Paths that should bypass validation completely
+const BYPASS_PATHS = [
+  '/_nuxt/',
+  '/favicon.ico',
+  '/robots.txt',
+  '/_robots.txt',
+  '/__nuxt_error',
+  '/__nuxt_content/',
+  '/api/_content/',
+  '/challenge',
+  '/api/verify-session'
+]
+
+// Static file extensions that should bypass validation
+const STATIC_EXTENSIONS = [
+  '.js',
+  '.css',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.svg',
+  '.ico',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.webp',
+  '.wasm',
+  '.map'
+]
+
+/**
+ * Checks if the user agent appears to be an archiver or bot
+ */
+function isArchiverBot(userAgent: string | undefined): boolean {
+  if (!userAgent) {
+    return false
+  }
+  const ua = userAgent.toLowerCase()
+  return ARCHIVER_USER_AGENTS.some(bot => ua.includes(bot))
+}
+
+/**
+ * Checks if the pathname is a static asset
+ */
+function isStaticAsset(pathname: string): boolean {
+  return STATIC_EXTENSIONS.some(ext => pathname.endsWith(ext))
+}
+
+/**
+ * Checks if the request should bypass validation
+ */
+function shouldBypass(pathname: string): boolean {
+  return BYPASS_PATHS.some(path => pathname.startsWith(path)) || isStaticAsset(pathname)
+}
+
+export default defineEventHandler(async (event) => {
+  const url = getRequestURL(event)
+  const pathname = url.pathname
+
+  // Skip validation for static assets and internal paths
+  if (shouldBypass(pathname)) {
+    return
+  }
+
+  // Add security headers to all responses
+  setHeader(event, 'X-Robots-Tag', 'noindex, noarchive, nosnippet, noimageindex')
+  setHeader(event, 'Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  setHeader(event, 'Pragma', 'no-cache')
+  setHeader(event, 'Expires', '0')
+
+  // Get runtime config for session secret
+  const config = useRuntimeConfig()
+  const sessionSecret = config.sessionSecret as string
+  const userAgent = getHeader(event, 'user-agent')
+
+  // Block known archivers immediately
+  if (isArchiverBot(userAgent)) {
+    console.log('[session-guard] Blocked archiver bot:', userAgent?.substring(0, 50))
+    throw createError({
+      statusCode: 403,
+      statusMessage: 'Forbidden',
+      message: 'Access denied'
+    })
+  }
+
+  // Validate session
+  const isValidated = getValidatedSession(event, sessionSecret)
+
+  // Set validation status in context for use by route handlers
+  event.context.validated = isValidated
+
+  // For content API routes, require validation
+  if (pathname.startsWith('/api/content/')) {
+    if (!isValidated) {
+      throw createError({
+        statusCode: 401,
+        statusMessage: 'Unauthorized',
+        message: 'Session validation required'
+      })
+    }
+    return
+  }
+
+  // Check if this is an HTML request (page navigation)
+  const acceptHeader = getHeader(event, 'accept') || ''
+  const isHtmlRequest = acceptHeader.includes('text/html')
+
+  // Redirect unvalidated HTML requests to the challenge page
+  if (!isValidated && isHtmlRequest && !pathname.startsWith('/api/')) {
+    const redirectUrl = `/challenge?redirect=${encodeURIComponent(pathname + url.search)}`
+    console.log('[session-guard] Redirecting to challenge:', pathname)
+    return sendRedirect(event, redirectUrl, 302)
+  }
+})
